@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <script>
+
+    if (location.protocol == "http:") {
+        location.protocol = "https:";
+    }
+    </script>
+    <meta charset="UTF-8">
+    <title>Face Camera reconnaissance</title>
+    <script src="js/face-api.js"></script>
+    <style>
+        input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { 
+            -webkit-appearance: none; 
+        }
+    </style>
+</head>
+
+<body>
+    <table>Ne pas laisser l'image de base et Attendre que le statut soit nul quand vous avez insérer une image(cela peut prendre presque 1 min), ne rafraîchissez pas la page à cahque photo sinon le programme va recharger les modèles à chaque fois.
+        Vous pouvez cliquer sur le bouton vert pour modifier le nom de la personne ou la notifier tout simplement.
+    </table>
+    <label>Upload l'image:</label> <input type="file" id="imgUploadInput" onchange="uploadImage(event)" accept=".jpg, .jpeg, .png">
+    <label>Webcam:</label><input id="webCamToggle" type="checkbox">
+    <input id="eer" value="% reconnaissance" disabled></label>
+    <label> <!--Seuil:--></label><input id="threshold" type="number" value=".30" step="0.01" min=".01" max="1.00" style="display: none;">
+    <label><!--Diffusion max:--></label><input id="maxDiff" type="number" value=".60" step="0.01" min=".01" max="1.00"style="display: none;">
+    Statut: <span id="status"></span>
+    <div id="imagediv">
+        <center><img id="myImg" src="bbt1.jpg" alt="" style="max-width: 800px;">
+        <video id="webCam"></video></center>
+    </div>
+    <script>
+    var labeledFaceDescriptors = [];
+    var faceMatcher = null;
+    var threshold = .3;
+    var maxDiff = .6;
+    var srcId = "myImg";
+    var webCamTimeout = 0;
+    
+    //localStorage.removeItem('faceMatcher'); 
+    if (localStorage.getItem('faceMatcher')) {
+        faceMatcher = faceapi.FaceMatcher.fromJSON(JSON.parse(localStorage.getItem('faceMatcher')));
+        labeledFaceDescriptors = faceMatcher.labeledDescriptors;
+        maxDiff = faceMatcher.distanceThreshold;
+        document.getElementById('maxDiff').value = maxDiff;
+    }
+
+    function clearFaceNames() {
+        let paras = document.getElementsByClassName('faceNames');
+        while (paras[0]) {
+            paras[0].parentNode.removeChild(paras[0]);
+        }
+    }
+
+    function drawFaceRecognitionResults(results) {
+        clearFaceNames()
+        inputImgEl = document.getElementById(srcId);
+        results = faceapi.resizeResults(results, inputImgEl);
+
+        results.forEach(function(result) {
+            let btn = document.createElement("button");
+            if (result.bestMatch.label != 'unknown') {
+                btn.innerText = result.bestMatch.label;
+            } else {
+                btn.innerText = result.age.toFixed(0) + ' années ' + result.expressions.asSortedArray()[0].expression + ' ' + result.gender+" (clic)";
+            }
+            btn.title = (100 * (1 - result.bestMatch.distance)).toFixed(0) + ' %';
+            document.getElementById("eer").value="Reconnu à "+btn.title;
+            btn.style.position = 'absolute';
+            btn.style.top = result.detection.box.top + 'px';
+            btn.style.left = result.detection.box.left + 'px';
+            btn.className = 'faceNames';
+            btn.dataset.person = result.bestMatch.label;
+            btn.dataset.descriptor = result.descriptor;
+            btn.addEventListener("click", personClick);
+            document.getElementById("imagediv").appendChild(btn);
+        })
+    }
+ 
+    function makeFaceMatcher() {
+        if (labeledFaceDescriptors.length > 0) {
+            faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, maxDiff);
+            localStorage.setItem('faceMatcher', JSON.stringify(faceMatcher.toJSON()));
+        }
+    }
+
+    function addDescriptor(newPerson, descriptor) {
+        for (let i = 0; i < labeledFaceDescriptors.length; i++) {
+            if (labeledFaceDescriptors[i].label == newPerson) {
+                labeledFaceDescriptors[i].descriptors.push(new Float32Array(descriptor.split(',')));
+                makeFaceMatcher();
+                return;
+            }
+        }
+        descriptors = [];
+        descriptors.push(new Float32Array(descriptor.split(',')));
+        labeledFaceDescriptors.push(new faceapi.LabeledFaceDescriptors(newPerson, descriptors));
+        makeFaceMatcher();
+    }
+
+    function personClick(e) {
+        var newPerson = prompt("Veuillez saisir le nom de la personne :", e.target.dataset.person);
+        if (newPerson == null || newPerson == "" || newPerson == "inconnu") {} else {
+            e.target.dataset.person = newPerson;
+            e.target.innerHTML = newPerson;
+            addDescriptor(newPerson, e.target.dataset.descriptor);
+            if (!document.getElementById('webCamToggle').checked) {
+                updateResults();
+            }
+        }
+    }
+    async function loadModels() {
+        console.time('Chargement...')
+        updateStatus('Chargement...');
+        //let weightsURI = "weights";
+        let weightsURI = "https://seattleacademy.github.io/faceRoster/weights";
+        updateStatus('ssdMobilenetv1');
+        await faceapi.nets.ssdMobilenetv1.load(weightsURI);
+        updateStatus('faceLandmark68Net');
+        await faceapi.nets.faceLandmark68Net.load(weightsURI);
+        updateStatus('faceExpressionNet');
+        await faceapi.nets.faceExpressionNet.load(weightsURI);
+        updateStatus('ageGenderNet');
+        await faceapi.nets.ageGenderNet.load(weightsURI);
+        updateStatus('faceRecognitionNet');
+        await faceapi.nets.faceRecognitionNet.loadFromUri(weightsURI)
+        console.timeEnd('Chargement...')
+    }
+
+    async function updateResults() {
+        console.time('Résultat update...')
+        updateStatus('Résultat update...');
+        let options = new faceapi.SsdMobilenetv1Options({ minConfidence: Number(threshold) })
+        results = await faceapi.detectAllFaces(srcId, options).withFaceLandmarks().withFaceExpressions().withAgeAndGender().withFaceDescriptors();
+
+        results.forEach(function(result, i, results) {
+            if (faceMatcher) {
+                results[i].bestMatch = faceMatcher.findBestMatch(result.descriptor)
+            } else {
+                results[i].bestMatch = new faceapi.FaceMatch('unknown', 1);
+            }
+        })
+
+        drawFaceRecognitionResults(results);
+        updateStatus('');
+        console.timeEnd('Résultat update...')
+        if (document.getElementById('webCamToggle').checked) {
+            webCamTimeout = setTimeout(updateResults, 200);
+        }
+    }
+
+    async function uploadImage(e) {
+        const imgFile = e.target.files[0]
+        const img = await faceapi.bufferToImage(imgFile)
+        document.getElementById("myImg").src = img.src
+        updateResults();
+    }
+
+    function toggleWebCam(enable) {
+        
+        
+        clearFaceNames()
+        webCam = document.getElementById('webCam');
+        let constraints = true;
+
+        if (enable) {
+            navigator.mediaDevices.getUserMedia({ video: constraints }).then(function(stream) {
+                document.getElementById("webCam").width = stream.getTracks()[0].getSettings().width;
+                document.getElementById("webCam").height = stream.getTracks()[0].getSettings().height;
+                srcId = "webCam"
+                document.getElementById("imgUploadInput").value = "";
+                document.getElementById("myImg").style.display = "none";
+                document.getElementById("webCam").style.display = "block";
+                webCam.srcObject = stream;
+                webCam.play().then(updateResults);
+            });
+        } else {
+            if (webCam.srcObject) {
+                webCam.srcObject.getTracks().forEach(function(track) {
+                    track.stop();
+                });
+            }
+            webCam.src = "";
+            srcId = "myImg";
+            document.getElementById("webCam").style.display = "none";
+            document.getElementById("myImg").style.display = "block";
+            clearTimeout(webCamTimeout);
+            updateResults();
+        }
+        document.getElementById('webCamToggle').checked = enable;
+    }
+
+    function updateStatus(str) {
+        document.getElementById("status").innerHTML = str;
+    }
+
+    document.getElementById('threshold').addEventListener('change', function(event) {
+        threshold = event.target.value;
+        makeFaceMatcher();
+        updateResults();
+    }, false);
+
+    document.getElementById('maxDiff').addEventListener('change', function(event) {
+        maxDiff = event.target.value;
+        makeFaceMatcher();
+        updateResults();
+    }, false);
+
+    document.getElementById('webCamToggle').addEventListener('change', function(event) {
+        toggleWebCam(event.target.checked);
+    }, false);
+
+    loadModels().then(updateResults);
+    </script>
+</body>
+<style>
+    head{
+        background-color: azure;
+    }
+    body{
+        background-color: rgb(29, 29, 29);
+  color: rgb(0, 255, 76);
+    }
+    button.faceNames{
+        background-color: #4CAF50; /* Green */
+        border: none;
+        color: white;
+        padding: 16px 32px;
+        text-align: center;
+        text-decoration: none;
+        display: inline-block;
+        font-size: 16px;
+        margin: 4px 2px;
+        transition-duration: 0.4s;
+        cursor: pointer;
+    }
+
+
+    button.faceNames:hover {
+  background-color: #4CAF50;
+  color: white;
+}
+#myImg{
+
+  border: 30px solid transparent;
+  padding: 20px;
+  border-image: repeating-linear-gradient(30deg, #9f0c6e, #e591c9, #9f0c0c 20px) 60;
+}
+
+</style>
+</html>
